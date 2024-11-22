@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"time"
+	"sync"
 
 	"github.com/getsentry/sentry-go"
 	sentryhttp "github.com/getsentry/sentry-go/http"
@@ -15,7 +16,10 @@ import (
 	cache "github.com/victorspringer/http-cache"
 	"github.com/victorspringer/http-cache/adapter/redis"
 	"golang.org/x/oauth2"
+	"golang.org/x/time/rate"
 )
+
+var mu sync.Mutex
 
 func main() {
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -36,8 +40,21 @@ func main() {
 		w.Write([]byte("OK"))
 	}))
 
+	limiter := rate.NewLimiter(rate.Limit(100.0/60.0), 1) // 1 burst size
+	
 	var rssHandler http.Handler
 	rssHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		var limit_counter int = 0
+		for !limiter.Allow() && limit_counter <= 30 {
+			log.Printf("Sleeping for 5s")
+			time.Sleep(1 * time.Second)
+			limit_counter++
+			// If the rate limit is exceeded, return HTTP 429 (Too Many Requests)
+			//http.Error(w, "Too many requests, please try again later", http.StatusTooManyRequests)
+			//return
+		}
 		httpClient := http.DefaultClient
 		var token *oauth2.Token
 		baseApiUrl := "https://www.reddit.com"
@@ -56,9 +73,13 @@ func main() {
 			username := os.Getenv("REDDIT_USERNAME")
 			password := os.Getenv("REDDIT_PASSWORD")
 			token, err = oauthCfg.PasswordCredentialsToken(r.Context(), username, password)
-			if err != nil {
-				http.Error(w, err.Error(), 500)
-				return
+			var token_counter int = 0
+			for err != nil && token_counter <=30 {
+				time.Sleep(1 * time.Second)
+				token, err = oauthCfg.PasswordCredentialsToken(r.Context(), username, password)
+				token_counter++
+				//http.Error(w, err.Error(), 500)
+				//return
 			}
 			baseApiUrl = "https://oauth.reddit.com"
 		}
